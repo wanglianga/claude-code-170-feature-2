@@ -97,6 +97,32 @@ function connectSse() {
     if (route.path === '/workbench') reloadWorkbench?.()
   })
   es.addEventListener('event-closed', () => reloadWorkbench?.())
+  es.addEventListener('refusal-escalated', ev => {
+    try {
+      const p = JSON.parse(ev.data)
+      ElNotification({
+        title: p.worsened ? '拒医复访症状加重·风险升级' : '拒医复访症状未缓解·风险升级',
+        message: `老人拒医后复访异常，已提升风险等级并重新通知家属与医疗人员，升级事件 #${p.eventId}（携带拒医历史）`,
+        type: 'error',
+        duration: 0,
+        onClick: () => router.push(`/events/${p.eventId}`)
+      })
+      window.dispatchEvent(new CustomEvent('workbench-reload'))
+    } catch (e) { /* ignore */ }
+  })
+  es.addEventListener('revisit-overdue', ev => {
+    try {
+      const p = JSON.parse(ev.data)
+      ElNotification({
+        title: '拒医 24 小时复访已逾期',
+        message: `有拒医复访任务超过 24 小时未完成（事件 #${p.eventId}），请立即复访`,
+        type: 'warning',
+        duration: 0,
+        onClick: () => router.push(`/events/${p.eventId}`)
+      })
+      window.dispatchEvent(new CustomEvent('workbench-reload'))
+    } catch (e) { /* ignore */ }
+  })
   es.onerror = () => {
     online.value = false
     clearTimeout(retryTimer)

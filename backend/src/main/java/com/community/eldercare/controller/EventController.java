@@ -118,6 +118,26 @@ public class EventController {
         return R.ok(eventService.followUpAndClose(id, req));
     }
 
+    /** 登记老人拒绝就医（记录医生建议/拒绝原因/家属知情/替代照护），自动生成 24 小时内复访任务 */
+    @PostMapping("/{id}/medical-refusals")
+    public R<Map<String, Object>> medicalRefusal(@PathVariable Long id,
+                                                 @Valid @RequestBody MedicalRefusalRequest req) {
+        return R.ok(eventService.recordMedicalRefusal(id, req));
+    }
+
+    /** 工作台复访任务列表（待复访/已逾期） */
+    @GetMapping("/revisits/pending")
+    public R<List<Map<String, Object>>> pendingRevisits() {
+        return R.ok(eventService.pendingRevisitTasks());
+    }
+
+    /** 完成拒医复访：RELIEVED 解除随访；WORSENED/UNRELIEVED 提升风险、重新通知并生成升级事件 */
+    @PostMapping("/revisits/{taskId}/complete")
+    public R<Map<String, Object>> completeRevisit(@PathVariable Long taskId,
+                                                  @Valid @RequestBody RevisitRequest req) {
+        return R.ok(eventService.completeRevisit(taskId, req));
+    }
+
     /** 补充事件备注 */
     @PostMapping("/{id}/notes")
     public R<Void> note(@PathVariable Long id, @RequestBody Map<String, String> body) {

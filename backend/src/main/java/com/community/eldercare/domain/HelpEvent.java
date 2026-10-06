@@ -32,9 +32,16 @@ public class HelpEvent {
     private Elder elder;
 
     /** NEW 待研判 / TRIAGED 已研判 / DISPATCHED 已转介 / ONSITE 已上门 / SERVICED 已服务 /
-     *  COMMUNICATED 已沟通家属 / FOLLOWED_UP 已回访 / CLOSED 已归档 */
+     *  COMMUNICATED 已沟通家属 / REFUSAL_TRACK 拒医随访中 / FOLLOWED_UP 待回访归档 / CLOSED 已归档 */
     @Column(nullable = false)
     private String status = "NEW";
+
+    /** 拒医随访闭环关联的事件 id：
+     *  拒医事件（relationType=REFUSAL_ROOT）复访症状恶化时生成的新事件指向原拒医事件；
+     *  新事件（relationType=ESCALATED_FROM_REFUSAL）携带原拒医记录、家属态度与医生建议，防止被当成普通求助。 */
+    private Long relatedEventId;
+    /** REFUSAL_ROOT 原拒医事件 / ESCALATED_FROM_REFUSAL 拒医恶化升级事件 */
+    private String relationType;
 
     /* ---------------- 求助信息 ---------------- */
 

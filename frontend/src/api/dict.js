@@ -51,6 +51,7 @@ export const RISK_LABEL = {
   FAMILY_UNREACHABLE: '家属长期不接电话',
   NEIGHBOR_INFO_UNCLEAR: '邻居代报信息不清',
   REFUSE_HOSPITAL: '老人拒绝就医',
+  REFUSAL_ESCALATED: '拒医复访升级',
   HOME_SAFETY_HAZARD: '家中存在安全隐患',
   FREQUENT_NIGHT_HELP: '频繁夜间求助'
 }
@@ -61,6 +62,7 @@ export const RISK_TAG = {
   FAMILY_UNREACHABLE: 'danger',
   NEIGHBOR_INFO_UNCLEAR: 'warning',
   REFUSE_HOSPITAL: 'danger',
+  REFUSAL_ESCALATED: 'danger',
   HOME_SAFETY_HAZARD: 'danger',
   FREQUENT_NIGHT_HELP: 'danger'
 }
@@ -72,6 +74,7 @@ export const STATUS_LABEL = {
   ONSITE: '已上门',
   SERVICED: '已服务',
   COMMUNICATED: '已沟通家属',
+  REFUSAL_TRACK: '拒医随访中',
   FOLLOWED_UP: '待回访归档',
   CLOSED: '已归档'
 }
@@ -83,8 +86,23 @@ export const STATUS_TAG = {
   ONSITE: 'primary',
   SERVICED: 'primary',
   COMMUNICATED: 'primary',
+  REFUSAL_TRACK: 'danger',
   FOLLOWED_UP: 'warning',
   CLOSED: 'success'
+}
+
+// 拒医复访方式
+export const REVISIT_METHOD_LABEL = {
+  PHONE: '电话复访',
+  ONSITE: '上门复访',
+  DOCTOR: '医生复诊'
+}
+
+// 拒医复访结果
+export const REVISIT_RESULT_LABEL = {
+  RELIEVED: '症状缓解',
+  UNRELIEVED: '症状未缓解',
+  WORSENED: '症状加重'
 }
 
 export const RISK_LEVEL_LABEL = {

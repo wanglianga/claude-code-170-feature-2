@@ -25,4 +25,7 @@ public interface HelpEventRepository extends JpaRepository<HelpEvent, Long> {
     List<HelpEvent> findByTimeRange(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 
     List<HelpEvent> findAllByOrderByCreatedAtDesc();
+
+    /** 由拒医随访升级生成的新事件（relatedEventId 指向原拒医事件） */
+    List<HelpEvent> findByRelatedEventId(Long relatedEventId);
 }

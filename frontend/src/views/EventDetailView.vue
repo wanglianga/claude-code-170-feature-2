@@ -16,6 +16,30 @@
       </template>
     </el-page-header>
 
+    <!-- 拒医复访升级事件提示：携带原拒医记录/家属态度/医生建议，防止被当成普通求助 -->
+    <el-alert v-if="d.event?.relationType === 'ESCALATED_FROM_REFUSAL'" type="error" show-icon
+              :closable="false" style="margin-bottom:12px">
+      <template #title>
+        <b>本事件由拒医事件 {{ d.relatedEvent?.eventNo }} 复访后升级生成，不是一次新的普通求助</b>
+      </template>
+      <div style="margin-top:4px">
+        系统已携带原拒医记录、家属态度与医生建议，风险等级提升至
+        <el-tag size="small" type="danger" effect="dark">{{ SEVERITY_LABEL[d.event?.severity] }}</el-tag>
+        并已重新通知家属与医疗人员。
+        <el-button v-if="d.relatedEvent" link type="primary" size="small"
+                   @click="$router.push(`/events/${d.relatedEvent.id}`)">查看原拒医事件 →</el-button>
+      </div>
+    </el-alert>
+    <el-alert v-if="d.escalatedEvent" type="warning" show-icon :closable="false" style="margin-bottom:12px">
+      <template #title>
+        本拒医事件复访后症状未缓解/加重，已生成升级事件
+        <el-button link type="primary" size="small"
+                   @click="$router.push(`/events/${d.escalatedEvent.id}`)">
+          {{ d.escalatedEvent.eventNo }} →
+        </el-button>
+      </template>
+    </el-alert>
+
     <el-row :gutter="12">
       <!-- 左：处置区 -->
       <el-col :span="17">
@@ -61,11 +85,90 @@
                        v-if="d.event?.triageType && d.event.triageType !== 'FALSE_TRIGGER'">家属沟通</el-button>
             <el-button type="success" :icon="Files" @click="openService"
                        v-if="d.event?.triageType && d.event.triageType !== 'FALSE_TRIGGER'">④ 后续服务</el-button>
-            <el-button type="danger" plain :icon="CircleCheck" @click="openFollow">
+            <el-button type="danger" plain :icon="Warning" @click="openRefusal"
+                       v-if="d.event?.triageType && d.event.triageType !== 'FALSE_TRIGGER' && !d.refusalBlocked">
+              登记拒绝就医
+            </el-button>
+            <el-tooltip v-if="d.refusalBlocked" content="拒医复访未完成，事件不能关闭" placement="top">
+              <span>
+                <el-button type="danger" plain disabled>⑤ 回访归档</el-button>
+              </span>
+            </el-tooltip>
+            <el-button v-if="!d.refusalBlocked" type="danger" plain :icon="CircleCheck" @click="openFollow">
               {{ d.event?.triageType === 'FALSE_TRIGGER' ? '② 回访归档' : '⑤ 回访归档' }}
             </el-button>
             <el-button :icon="EditPen" @click="noteDialog = true">添加备注</el-button>
           </el-space>
+          <el-alert v-if="d.refusalBlocked" type="error" :closable="false" style="margin-top:10px"
+                    title="该事件存在老人拒绝就医记录：24 小时内复访未完成，事件不能关闭。请在下方完成复访登记。" />
+        </el-card>
+
+        <!-- 拒医随访闭环 -->
+        <el-card v-if="d.refusals?.length" shadow="never" style="margin-bottom:12px"
+                 class="refusal-card">
+          <template #header>
+            <span class="section-title">
+              拒绝就医与 24 小时复访
+              <el-tag v-if="d.refusalBlocked" type="danger" size="small" effect="dark" style="margin-left:8px">
+                随访中·禁止关闭
+              </el-tag>
+              <el-tag v-else type="success" size="small" style="margin-left:8px">随访已了结</el-tag>
+            </span>
+          </template>
+
+          <div v-for="r in d.refusals" :key="r.id" class="record-box refusal-box">
+            <el-descriptions :column="2" border size="small">
+              <el-descriptions-item label="异常体征" :span="2">
+                <span style="color:#f56c6c;font-weight:600">{{ r.abnormalSign || '—' }}</span>
+              </el-descriptions-item>
+              <el-descriptions-item label="家庭医生">
+                <b>{{ r.doctorName }}</b>
+              </el-descriptions-item>
+              <el-descriptions-item label="登记时间">{{ fmt(r.recordedAt) }}（{{ r.recordedByName }}）</el-descriptions-item>
+              <el-descriptions-item label="医生建议" :span="2">{{ r.doctorAdvice }}</el-descriptions-item>
+              <el-descriptions-item label="老人拒绝原因" :span="2">{{ r.refuseReason }}</el-descriptions-item>
+              <el-descriptions-item label="家属是否知情">
+                <el-tag size="small" :type="r.familyInformed ? 'success' : 'danger'">
+                  {{ r.familyInformed ? '已知情' : '不知情' }}
+                </el-tag>
+                <span v-if="r.familyInformed" style="margin-left:6px">
+                  {{ r.familyName }} · {{ r.familyAttitude || '态度未记录' }}
+                </span>
+              </el-descriptions-item>
+              <el-descriptions-item label="随访结论">
+                <el-tag v-if="r.resolved" size="small"
+                        :type="r.resolveOutcome === 'RELIEVED' ? 'success' : 'danger'">
+                  {{ REVISIT_RESULT_LABEL[r.resolveOutcome] }}
+                </el-tag>
+                <el-tag v-else size="small" type="warning">待复访</el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item label="替代照护安排" :span="2">{{ r.alternativeCare || '无' }}</el-descriptions-item>
+            </el-descriptions>
+          </div>
+
+          <el-divider content-position="left">复访任务</el-divider>
+          <div v-for="t in d.revisitTasks" :key="t.id" class="revisit-row">
+            <el-tag :type="REVISIT_TAG[t.status]" effect="plain">
+              {{ REVISIT_TASK_STATUS[t.status] || t.status }}
+            </el-tag>
+            <el-tag size="small" type="warning" effect="dark" style="margin-left:6px">
+              {{ REVISIT_METHOD_LABEL[t.method] }}
+            </el-tag>
+            <b style="margin:0 8px">责任人 {{ t.assigneeName || '—' }}</b>
+            <span class="muted">截止 {{ fmt(t.dueAt) }}</span>
+            <el-button v-if="t.status !== 'COMPLETED'" type="danger" size="small" style="margin-left:auto"
+                       @click="openRevisit(t)">完成复访登记</el-button>
+            <template v-else>
+              <el-tag v-if="t.familyNotified" size="small" type="success" style="margin-left:auto">已重新通知家属</el-tag>
+              <el-tag v-if="t.medicalNotified" size="small" type="danger" style="margin-left:6px">已重新通知医疗人员</el-tag>
+            </template>
+            <div style="width:100%;margin-top:4px">
+              <span v-if="t.result" class="muted">
+                复访结果：{{ REVISIT_RESULT_LABEL[t.result] }} · {{ fmt(t.completedAt) }} · {{ t.completedByName }}
+              </span>
+              <div v-if="t.note" class="muted">说明：{{ t.note }}</div>
+            </div>
+          </div>
         </el-card>
 
         <!-- 处置记录 -->
@@ -494,6 +597,99 @@
       </template>
     </el-dialog>
 
+    <!-- ===== 登记拒绝就医 ===== -->
+    <el-dialog v-model="refusalDialog" title="登记老人拒绝就医（生成 24 小时内复访任务）" width="620px" top="5vh">
+      <el-alert type="error" :closable="false" style="margin-bottom:12px"
+                title="家庭医生判断体征异常但老人拒绝就医时登记。事件将进入“拒医随访中”，复访完成前不能关闭。" />
+      <el-form :model="refusal" label-width="110px">
+        <el-form-item label="异常体征">
+          <el-input v-model="refusal.abnormalSign" placeholder="如 血压 185/110mmHg，头晕、胸闷" />
+        </el-form-item>
+        <el-form-item label="家庭医生">
+          <el-input v-model="refusal.doctorName" placeholder="提出就医建议的医生姓名" />
+        </el-form-item>
+        <el-form-item label="医生建议">
+          <el-input v-model="refusal.doctorAdvice" type="textarea" :rows="2"
+                    placeholder="建议就诊科室、风险告知、用药监测要求等" />
+        </el-form-item>
+        <el-form-item label="老人拒绝原因">
+          <el-input v-model="refusal.refuseReason" type="textarea" :rows="2"
+                    placeholder="如 怕花钱 / 怕麻烦子女 / 自觉无大碍 / 行动不便" />
+        </el-form-item>
+        <el-form-item label="家属是否知情">
+          <el-switch v-model="refusal.familyInformed" active-text="已知情" inactive-text="不知情" />
+        </el-form-item>
+        <template v-if="refusal.familyInformed">
+          <el-form-item label="知情家属">
+            <el-input v-model="refusal.familyName" placeholder="家属姓名" style="width:48%" />
+            <el-select v-model="refusal.familyAttitude" placeholder="家属态度" style="width:48%;margin-left:4%">
+              <el-option label="积极配合送医" value="积极配合送医" />
+              <el-option label="尊重老人意愿" value="尊重老人意愿" />
+              <el-option label="拒绝送医" value="拒绝送医" />
+              <el-option label="无法联系" value="无法联系" />
+            </el-select>
+          </el-form-item>
+        </template>
+        <el-form-item label="替代照护安排">
+          <el-input v-model="refusal.alternativeCare" type="textarea" :rows="2"
+                    placeholder="未送医期间的用药、血压监测、陪护/邻里照看等安排" />
+        </el-form-item>
+        <el-form-item label="复访方式">
+          <el-radio-group v-model="refusal.revisitMethod">
+            <el-radio v-for="(v, k) in REVISIT_METHOD_LABEL" :key="k" :value="k">{{ v }}</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="复访责任人">
+          <el-input v-model="refusal.revisitAssignee" placeholder="留空默认当前操作人" />
+        </el-form-item>
+        <el-form-item label="复访截止">
+          <el-date-picker v-model="refusal.revisitDueAt" type="datetime" placeholder="留空默认 24 小时内"
+                          value-format="YYYY-MM-DDTHH:mm:ss" style="width:100%" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="refusalDialog = false">取消</el-button>
+        <el-button type="danger" @click="submitRefusal">保存并生成复访任务</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ===== 完成拒医复访 ===== -->
+    <el-dialog v-model="revisitDialog" title="完成拒医复访登记" width="560px">
+      <el-alert type="warning" :closable="false" style="margin-bottom:12px"
+                title="症状加重或未缓解时，平台将提升风险等级、重新通知家属与医疗人员，并把原拒医记录、家属态度、医生建议带入一条新的升级事件。" />
+      <el-form :model="revisit" label-width="100px">
+        <el-form-item label="实际复访方式">
+          <el-radio-group v-model="revisit.method">
+            <el-radio v-for="(v, k) in REVISIT_METHOD_LABEL" :key="k" :value="k">{{ v }}</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="复访结果">
+          <el-radio-group v-model="revisit.result">
+            <el-radio value="RELIEVED">症状缓解（解除随访，可归档）</el-radio>
+            <el-radio value="UNRELIEVED">症状未缓解（升级+重新通知）</el-radio>
+            <el-radio value="WORSENED">症状加重（极高风险+呼叫120）</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="重新通知方式" v-if="revisit.result !== 'RELIEVED'">
+          <el-select v-model="revisit.notifyChannel" style="width:100%">
+            <el-option label="电话" value="电话" />
+            <el-option label="短信" value="短信" />
+            <el-option label="微信" value="微信" />
+            <el-option label="当面" value="当面" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="复访说明">
+          <el-input v-model="revisit.note" type="textarea" :rows="3"
+                    placeholder="现场症状、血压复测值、处置情况等" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="revisitDialog = false">取消</el-button>
+        <el-button :type="revisit.result === 'RELIEVED' ? 'success' : 'danger'"
+                   @click="submitRevisit">提交复访结果</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 风险标记 / 备注 -->
     <el-dialog v-model="flagDialog" title="补充风险标记" width="420px">
       <el-radio-group v-model="manualFlag" style="display:flex;flex-direction:column;gap:8px">
@@ -516,32 +712,37 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Plus, Search, Phone, House, ChatDotRound, Files, CircleCheck, CircleClose,
-  EditPen, Picture, UserFilled
+  EditPen, Picture, UserFilled, Warning
 } from '@element-plus/icons-vue'
 import api from '../api'
 import {
   SOURCE_LABEL, TRIAGE_LABEL, SEVERITY_LABEL, SEVERITY_TAG, TARGET_LABEL,
   SERVICE_LABEL, FOLLOW_RESULT_LABEL, RISK_LABEL, RISK_TAG, STATUS_LABEL, STATUS_TAG,
-  RISK_LEVEL_LABEL, RISK_LEVEL_TAG, ENTRY_METHODS, ELDER_STATUS_OPTIONS
+  RISK_LEVEL_LABEL, RISK_LEVEL_TAG, ENTRY_METHODS, ELDER_STATUS_OPTIONS,
+  REVISIT_METHOD_LABEL, REVISIT_RESULT_LABEL
 } from '../api/dict'
 
 const route = useRoute()
+const router = useRouter()
 const d = ref({})
 const loading = ref(false)
 
 const DISPATCH_STATUS = { NOTIFIED: '已通知', ACCEPTED: '已受理', ARRIVED: '已到场', REJECTED: '无法响应' }
+const REVISIT_TASK_STATUS = { PENDING: '待复访', COMPLETED: '已复访', OVERDUE: '已逾期' }
+const REVISIT_TAG = { PENDING: 'warning', COMPLETED: 'success', OVERDUE: 'danger' }
 const LOG_LABEL = {
   HELP: '求助', TRIAGE: '研判', DISPATCH: '转介', ONSITE: '上门', SERVICE: '服务',
-  FAMILY_COMM: '家属沟通', FOLLOW_UP: '回访', CLOSE: '归档', SYSTEM: '系统', NOTE: '备注'
+  FAMILY_COMM: '家属沟通', FOLLOW_UP: '回访', CLOSE: '归档', SYSTEM: '系统', NOTE: '备注',
+  REFUSAL: '拒医登记', REVISIT: '拒医复访'
 }
 const LOG_TYPE = {
   HELP: 'danger', TRIAGE: 'warning', DISPATCH: 'warning', ONSITE: 'primary',
   SERVICE: 'success', FAMILY_COMM: 'info', FOLLOW_UP: 'success', CLOSE: 'success',
-  SYSTEM: 'info', NOTE: 'info'
+  SYSTEM: 'info', NOTE: 'info', REFUSAL: 'danger', REVISIT: 'danger'
 }
 
 const flags = computed(() => (d.value.event?.riskFlags || '').split(',').filter(Boolean))
@@ -674,6 +875,59 @@ async function submitFollow() {
   load()
 }
 
+/* ---- 拒绝就医登记 ---- */
+const refusalDialog = ref(false)
+const refusal = reactive({})
+function openRefusal() {
+  Object.assign(refusal, {
+    abnormalSign: '', doctorName: '', doctorAdvice: '', refuseReason: '',
+    familyInformed: false, familyName: '', familyAttitude: '积极配合送医',
+    alternativeCare: '', revisitMethod: 'PHONE', revisitAssignee: '', revisitDueAt: null
+  })
+  refusalDialog.value = true
+}
+async function submitRefusal() {
+  if (!refusal.doctorName || !refusal.doctorAdvice || !refusal.refuseReason) {
+    ElMessage.warning('请填写家庭医生、医生建议与老人拒绝原因')
+    return
+  }
+  await api.post(`/events/${route.params.id}/medical-refusals`, refusal)
+  ElMessage.success('已登记拒绝就医，并生成 24 小时内复访任务')
+  refusalDialog.value = false
+  load()
+}
+
+/* ---- 完成拒医复访 ---- */
+const revisitDialog = ref(false)
+const revisit = reactive({})
+const currentTask = ref(null)
+function openRevisit(task) {
+  currentTask.value = task
+  Object.assign(revisit, {
+    result: 'RELIEVED', method: task.method || 'PHONE', note: '', notifyChannel: '电话'
+  })
+  revisitDialog.value = true
+}
+async function submitRevisit() {
+  if (revisit.result !== 'RELIEVED') {
+    await ElMessageBox.confirm(
+      revisit.result === 'WORSENED'
+        ? '复访判定症状加重：将提升为极高风险、呼叫 120 并重新通知家属/医生，同时生成携带历史的升级事件。确认？'
+        : '复访判定症状未缓解：将提升风险等级、重新通知家属/医生，并生成携带历史的升级事件。确认？',
+      '复访升级确认', { type: 'warning', confirmButtonText: '确认升级' })
+  }
+  const res = await api.post(`/events/revisits/${currentTask.value.id}/complete`, revisit)
+  revisitDialog.value = false
+  if (res.relieved) {
+    ElMessage.success('复访症状缓解，随访闭环结束，事件可正常回访归档')
+    load()
+  } else if (res.escalatedEvent) {
+    ElMessage.warning(`已生成升级事件 ${res.escalatedEvent.eventNo}，正在跳转…`)
+    revisitDialog.value = false
+    router.push(`/events/${res.escalatedEvent.id}`)
+  }
+}
+
 const flagDialog = ref(false)
 const manualFlag = ref('CANNOT_OPEN_DOOR')
 async function submitFlag() {
@@ -700,6 +954,13 @@ onMounted(() => {
 
 <style scoped>
 .record-box { margin-bottom: 10px; }
+.refusal-card { border: 1px solid #fbc4c4; }
+.refusal-box { border-left: 3px solid #f56c6c; padding-left: 8px; }
+.revisit-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+  padding: 8px 10px; margin-bottom: 8px; background: #fef6f6; border-radius: 6px;
+  border: 1px dashed #f5b7b7;
+}
 .elder-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .person-row { display: flex; align-items: center; gap: 2px; padding: 5px 0; font-size: 13px; border-bottom: 1px dashed #ebeef5; }
 </style>

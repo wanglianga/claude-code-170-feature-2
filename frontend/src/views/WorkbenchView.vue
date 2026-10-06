@@ -15,6 +15,52 @@
       </el-col>
     </el-row>
 
+    <!-- 拒医 24 小时复访任务 -->
+    <el-card v-if="revisits.length" shadow="never" class="revisit-card">
+      <template #header>
+        <div class="card-head">
+          <span class="section-title" style="margin:0">
+            <el-icon color="#f56c6c"><AlarmClock /></el-icon>
+            拒医后 24 小时复访任务（{{ revisits.length }}）
+          </span>
+          <el-tag type="danger" effect="dark" size="small">未完成复访的事件禁止关闭</el-tag>
+        </div>
+      </template>
+      <el-table :data="revisits" size="small" @row-click="row => $router.push(`/events/${row.eventId}`)"
+                style="cursor:pointer" :row-class-name="rvClass">
+        <el-table-column label="老人" width="100">
+          <template #default="{ row }">
+            <b>{{ row.elderName }}</b>
+            <el-tag size="small" :type="RISK_LEVEL_TAG[row.riskLevel]" effect="plain" style="margin-left:4px">
+              {{ RISK_LEVEL_LABEL[row.riskLevel] }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="原事件" width="130">
+          <template #default="{ row }">{{ row.eventNo }}</template>
+        </el-table-column>
+        <el-table-column label="异常体征" min-width="180">
+          <template #default="{ row }">{{ row.abnormalSign || '—' }}（医生 {{ row.doctorName }}）</template>
+        </el-table-column>
+        <el-table-column label="复访方式" width="110">
+          <template #default="{ row }">
+            <el-tag size="small" type="warning" effect="dark">{{ REVISIT_METHOD_LABEL[row.method] }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="责任人" width="100">
+          <template #default="{ row }">{{ row.assigneeName || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="截止时间 / 状态" width="220">
+          <template #default="{ row }">
+            <span>{{ fmt(row.dueAt) }}</span>
+            <el-tag size="small" :type="row.overdue ? 'danger' : 'warning'" effect="plain" style="margin-left:6px">
+              {{ row.overdue ? '已逾期' : '待复访' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
     <el-card shadow="never">
       <template #header>
         <div class="card-head">
@@ -116,16 +162,18 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Bell, BellFilled, Moon, Timer, CircleCheck, Warning } from '@element-plus/icons-vue'
+import { Bell, BellFilled, Moon, Timer, CircleCheck, Warning, AlarmClock } from '@element-plus/icons-vue'
 import api from '../api'
 import {
   SOURCE_LABEL, TRIAGE_LABEL, SEVERITY_LABEL, SEVERITY_TAG,
-  RISK_LABEL, RISK_TAG, STATUS_LABEL, STATUS_TAG
+  RISK_LABEL, RISK_TAG, STATUS_LABEL, STATUS_TAG,
+  RISK_LEVEL_LABEL, RISK_LEVEL_TAG, REVISIT_METHOD_LABEL
 } from '../api/dict'
 
 const router = useRouter()
 const events = ref([])
 const elders = ref([])
+const revisits = ref([])
 const loading = ref(false)
 const filter = ref('')
 const showHelp = ref(false)
@@ -136,7 +184,7 @@ const helpForm = reactive({
 
 const kpis = computed(() => [
   { label: '待研判', value: events.value.filter(e => e.status === 'NEW').length, color: '#f56c6c', icon: BellFilled },
-  { label: '处置中', value: events.value.filter(e => !['CLOSED', 'NEW'].includes(e.status)).length, color: '#e6a23c', icon: Timer },
+  { label: '拒医待复访', value: revisits.value.length, color: '#fa541c', icon: AlarmClock },
   { label: '夜间求助', value: events.value.filter(e => e.nightHelp).length, color: '#722ed1', icon: Moon },
   { label: '含风险标记', value: events.value.filter(e => e.riskFlags).length, color: '#fa8c16', icon: Warning }
 ])
@@ -147,7 +195,12 @@ async function load() {
     const params = {}
     if (filter.value === 'CLOSED') params.status = 'CLOSED'
     else if (filter.value === 'all') params.all = true
-    events.value = await api.get('/events', { params })
+    const [ev, rv] = await Promise.all([
+      api.get('/events', { params }),
+      api.get('/events/revisits/pending').catch(() => [])
+    ])
+    events.value = ev
+    revisits.value = rv
   } finally {
     loading.value = false
   }
@@ -173,6 +226,10 @@ function rowClass({ row }) {
   return row.status === 'NEW' ? 'row-new' : ''
 }
 
+function rvClass({ row }) {
+  return row.overdue ? 'row-overdue' : 'row-pending-revisit'
+}
+
 function fmt(s) {
   return s ? s.replace('T', ' ').substring(0, 16) : ''
 }
@@ -191,5 +248,8 @@ onUnmounted(() => window.removeEventListener('workbench-reload', onReload))
 .kpi { display: flex; justify-content: space-between; align-items: center; }
 .kpi-num { font-size: 30px; font-weight: 700; line-height: 1.2; }
 .card-head { display: flex; justify-content: space-between; align-items: center; }
+.revisit-card { margin-bottom: 12px; border: 1px solid #fbc4c4; }
 :deep(.row-new) { background: #fef0f0 !important; }
+:deep(.row-overdue) { background: #fde2e2 !important; }
+:deep(.row-pending-revisit) { background: #fff7e6 !important; }
 </style>

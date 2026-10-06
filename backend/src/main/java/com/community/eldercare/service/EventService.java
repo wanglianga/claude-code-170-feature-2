@@ -31,6 +31,8 @@ public class EventService {
     private final EventFollowUpRepository followUpRepo;
     private final EmergencyContactRepository contactRepo;
     private final NeighborResponderRepository neighborRepo;
+    private final MedicalRefusalRepository refusalRepo;
+    private final RevisitTaskRepository revisitRepo;
     private final SseService sse;
 
     @Value("${app.location-offset-meters:500}")
@@ -39,11 +41,16 @@ public class EventService {
     @Value("${app.frequent-night-threshold:3}")
     private int frequentNightThreshold;
 
+    /** 拒医复访时限（小时），默认 24 小时内 */
+    @Value("${app.refusal-revisit-hours:24}")
+    private int refusalRevisitHours;
+
     public EventService(HelpEventRepository eventRepo, ElderRepository elderRepo,
                         EventLogRepository logRepo, EventDispatchRepository dispatchRepo,
                         OnsiteVisitRepository onsiteRepo, EventServiceRepository serviceRepo,
                         FamilyCommunicationRepository commRepo, EventFollowUpRepository followUpRepo,
                         EmergencyContactRepository contactRepo, NeighborResponderRepository neighborRepo,
+                        MedicalRefusalRepository refusalRepo, RevisitTaskRepository revisitRepo,
                         SseService sse) {
         this.eventRepo = eventRepo;
         this.elderRepo = elderRepo;
@@ -55,6 +62,8 @@ public class EventService {
         this.followUpRepo = followUpRepo;
         this.contactRepo = contactRepo;
         this.neighborRepo = neighborRepo;
+        this.refusalRepo = refusalRepo;
+        this.revisitRepo = revisitRepo;
         this.sse = sse;
     }
 
@@ -332,11 +341,353 @@ public class EventService {
         return c;
     }
 
+    /* ===================== 拒绝就医登记 + 24 小时复访 ===================== */
+
+    /**
+     * 登记老人拒绝就医：记录医生建议、老人拒绝原因、家属是否知情、替代照护安排。
+     * 事件不允许直接关闭，自动生成一条 24 小时内到期的复访任务。
+     */
+    @Transactional
+    public Map<String, Object> recordMedicalRefusal(Long eventId, MedicalRefusalRequest req) {
+        HelpEvent e = mustGet(eventId);
+
+        MedicalRefusal r = new MedicalRefusal();
+        r.setEvent(e);
+        r.setAbnormalSign(req.getAbnormalSign());
+        r.setDoctorName(req.getDoctorName());
+        r.setDoctorAdvice(req.getDoctorAdvice());
+        r.setRefuseReason(req.getRefuseReason());
+        r.setFamilyInformed(req.isFamilyInformed());
+        r.setFamilyName(req.getFamilyName());
+        r.setFamilyAttitude(req.getFamilyAttitude());
+        r.setAlternativeCare(req.getAlternativeCare());
+        r.setRecordedByName(UserContext.currentName());
+        r.setRecordedAt(LocalDateTime.now());
+        r = refusalRepo.save(r);
+
+        // 24 小时内复访任务（方式：电话复访/上门复访/医生复诊）
+        RevisitTask t = new RevisitTask();
+        t.setEvent(e);
+        t.setRefusal(r);
+        t.setMethod(normalizeRevisitMethod(req.getRevisitMethod()));
+        t.setAssigneeName(req.getRevisitAssignee() == null || req.getRevisitAssignee().isBlank()
+                ? UserContext.currentName() : req.getRevisitAssignee());
+        LocalDateTime due = req.getRevisitDueAt() != null
+                ? req.getRevisitDueAt() : LocalDateTime.now().plusHours(refusalRevisitHours);
+        t.setDueAt(due);
+        t = revisitRepo.save(t);
+
+        Set<String> flags = flagsOf(e);
+        flags.add("REFUSE_HOSPITAL");
+        e.setRiskFlags(String.join(",", flags));
+        // 拒医随访闭环未结束前，事件停在“拒医随访中”，不能归档
+        e.setStatus("REFUSAL_TRACK");
+        if (e.getRelationType() == null) {
+            e.setRelationType("REFUSAL_ROOT");
+        }
+        eventRepo.save(e);
+
+        addLog(e, "REFUSAL", "老人拒绝就医：家庭医生 " + req.getDoctorName()
+                + " 判断体征异常（" + nz(req.getAbnormalSign(), "未记录") + "），建议 " + req.getDoctorAdvice()
+                + "；老人拒绝原因：" + req.getRefuseReason()
+                + "；家属" + (req.isFamilyInformed()
+                        ? "已知情" + (req.getFamilyName() != null ? "（" + req.getFamilyName() + "）" : "")
+                        + "，态度 " + nz(req.getFamilyAttitude(), "未记录") : "不知情")
+                + "；替代照护安排：" + nz(req.getAlternativeCare(), "无"),
+                UserContext.currentName());
+        addLog(e, "REVISIT", "已生成 24 小时内复访任务：" + revisitMethodLabel(t.getMethod())
+                + "，责任人 " + t.getAssigneeName() + "，截止 " + t.getDueAt()
+                + "。复访完成前事件不得关闭", "系统");
+
+        Map<String, Object> broadcast = new HashMap<>();
+        broadcast.put("eventId", eventId);
+        broadcast.put("taskId", t.getId());
+        broadcast.put("dueAt", t.getDueAt().toString());
+        sse.broadcast("refusal-created", broadcast);
+        broadcast("event-update", eventId);
+
+        Map<String, Object> ret = new LinkedHashMap<>();
+        ret.put("refusal", r);
+        ret.put("task", t);
+        return ret;
+    }
+
+    /**
+     * 完成拒医复访：
+     * RELIEVED 症状缓解 → 解除随访，事件可正常回访归档；
+     * WORSENED 症状加重 / UNRELIEVED 症状未缓解 → 提升风险等级、重新通知家属与医疗人员，
+     * 并把原拒医记录、家属态度、医生建议带入一条新的升级事件，防止值班人员误判为普通求助。
+     */
+    @Transactional
+    public Map<String, Object> completeRevisit(Long taskId, RevisitRequest req) {
+        RevisitTask t = revisitRepo.findById(taskId)
+                .orElseThrow(() -> new ApiException(404, "复访任务不存在: " + taskId));
+        if ("COMPLETED".equals(t.getStatus())) {
+            throw new ApiException("该复访任务已完成");
+        }
+        String result = req.getResult();
+        if (!List.of("RELIEVED", "UNRELIEVED", "WORSENED").contains(result)) {
+            throw new ApiException("复访结果只能是 RELIEVED / UNRELIEVED / WORSENED");
+        }
+        HelpEvent root = t.getEvent();
+        MedicalRefusal r = t.getRefusal();
+        LocalDateTime now = LocalDateTime.now();
+
+        t.setResult(result);
+        t.setCompletedAt(now);
+        t.setCompletedByName(UserContext.currentName());
+        t.setNote(req.getNote());
+        if (req.getMethod() != null && !req.getMethod().isBlank()) {
+            t.setMethod(normalizeRevisitMethod(req.getMethod()));
+        }
+
+        addLog(root, "REVISIT", revisitMethodLabel(t.getMethod()) + "复访结果：" + revisitResultLabel(result)
+                + note(req.getNote()), UserContext.currentName());
+
+        Map<String, Object> ret = new LinkedHashMap<>();
+
+        if ("RELIEVED".equals(result)) {
+            // 症状缓解：解除随访闭环，事件回到可正常回访归档状态
+            t.setStatus("COMPLETED");
+            r.setResolved(true);
+            r.setResolveOutcome("RELIEVED");
+            r.setResolvedAt(now);
+            refusalRepo.save(r);
+            revisitRepo.save(t);
+            addLog(root, "REVISIT", "复访症状缓解，拒医随访闭环结束，事件可正常回访归档", UserContext.currentName());
+            broadcast("event-update", root.getId());
+            ret.put("task", t);
+            ret.put("relieved", true);
+            return ret;
+        }
+
+        // 症状加重 / 未缓解：生成升级新事件并携带完整历史上下文
+        HelpEvent ne = createEscalatedEvent(root, r, result, req, now);
+        t.setStatus("COMPLETED");
+        t.setEscalatedEventId(ne.getId());
+        t.setFamilyNotified(true);
+        t.setMedicalNotified(true);
+
+        r.setResolved(true);
+        r.setResolveOutcome(result);
+        r.setResolvedAt(now);
+        r.setEscalatedEventId(ne.getId());
+        refusalRepo.save(r);
+        revisitRepo.save(t);
+
+        boolean worsened = "WORSENED".equals(result);
+        addLog(root, "REVISIT", "复访" + (worsened ? "症状加重" : "症状未缓解")
+                + "，已提升风险等级、重新通知家属与医疗人员，并生成升级事件 " + ne.getEventNo()
+                + "（携带原拒医记录、家属态度与医生建议）。本拒医随访闭环结束，原事件可归档", UserContext.currentName());
+        broadcast("event-update", root.getId());
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("eventId", ne.getId());
+        payload.put("rootEventId", root.getId());
+        payload.put("worsened", worsened);
+        sse.broadcast("refusal-escalated", payload);
+        ret.put("task", t);
+        ret.put("relieved", false);
+        ret.put("escalatedEvent", ne);
+        return ret;
+    }
+
+    /** 生成携带拒医上下文的升级事件，并重新通知家属、家庭医生（加重时加 120），提升老人风险等级 */
+    private HelpEvent createEscalatedEvent(HelpEvent root, MedicalRefusal r, String result,
+                                           RevisitRequest req, LocalDateTime now) {
+        boolean worsened = "WORSENED".equals(result);
+        Elder elder = root.getElder();
+
+        HelpEvent ne = new HelpEvent();
+        ne.setEventNo(generateEventNo());
+        ne.setElder(elder);
+        ne.setStatus("TRIAGED"); // 已由系统预研判，直接进入处置队列，不被当成普通新求助
+        ne.setSource(root.getSource());
+        ne.setSourceDetail("拒医复访" + (worsened ? "症状加重" : "症状未缓解") + "升级");
+        ne.setNightHelp(now.getHour() >= 22 || now.getHour() < 6);
+        ne.setRelatedEventId(root.getId());
+        ne.setRelationType("ESCALATED_FROM_REFUSAL");
+        ne.setTriageType("BODY_DISCOMFORT");
+        ne.setSeverity(worsened ? "CRITICAL" : "HIGH");
+        ne.setTriageNote("拒医复访" + (worsened ? "症状加重" : "症状未缓解") + "，系统自动升级");
+        ne.setTriageWorkerName("系统");
+        ne.setTriagedAt(now);
+        Set<String> flags = new LinkedHashSet<>();
+        flags.add("REFUSE_HOSPITAL");
+        flags.add("REFUSAL_ESCALATED");
+        ne.setRiskFlags(String.join(",", flags));
+        ne.setVoiceContent("拒医复访" + (worsened ? "症状加重" : "症状未缓解") + "：" + nz(r.getAbnormalSign(), ""));
+        ne = eventRepo.save(ne);
+
+        // 把原拒医记录、家属态度、医生建议完整带入新事件时间线
+        addLog(ne, "SYSTEM", "⚠ 本事件由拒医事件 " + root.getEventNo() + " 复访"
+                + (worsened ? "症状加重" : "症状未缓解") + "升级生成，携带完整历史，不是一次新的普通求助", "系统");
+        addLog(ne, "REFUSAL", "【原拒医记录】家庭医生 " + r.getDoctorName()
+                + " 判断体征异常（" + nz(r.getAbnormalSign(), "未记录") + "）；医生建议：" + r.getDoctorAdvice()
+                + "；老人拒绝原因：" + r.getRefuseReason()
+                + "；替代照护安排：" + nz(r.getAlternativeCare(), "无"), r.getRecordedByName());
+        addLog(ne, "REFUSAL", "【家属态度】" + (r.isFamilyInformed()
+                ? "已知情" + (r.getFamilyName() != null ? "（" + r.getFamilyName() + "）" : "")
+                + "，态度 " + nz(r.getFamilyAttitude(), "未记录") : "家属不知情"),
+                r.getRecordedByName());
+        var comms = commRepo.findByEventIdOrderByCommunicatedAtAsc(root.getId());
+        if (!comms.isEmpty()) {
+            FamilyCommunication last = comms.get(comms.size() - 1);
+            addLog(ne, "FAMILY_COMM", "【原事件家属沟通】最近一次联系 " + last.getContactName()
+                    + "：" + (last.isReached() ? "已接通，态度 " + nz(last.getAttitude(), "未记录") : "未接通")
+                    + "（" + nz(last.getNote(), "无备注") + "）", last.getOperatorName());
+        }
+        addLog(ne, "REVISIT", "【本次复访】" + revisitResultLabel(result)
+                + "，复访人 " + UserContext.currentName() + note(req.getNote()), UserContext.currentName());
+
+        // 重新通知家属
+        EmergencyContact primary = contactRepo.findByElderId(elder.getId()).stream()
+                .filter(EmergencyContact::isPrimaryContact).findFirst()
+                .orElse(contactRepo.findByElderId(elder.getId()).stream().findFirst().orElse(null));
+        FamilyCommunication fc = new FamilyCommunication();
+        fc.setEvent(ne);
+        if (primary != null) {
+            fc.setContact(primary);
+        }
+        fc.setContactName(r.getFamilyName() != null && !r.getFamilyName().isBlank()
+                ? r.getFamilyName() : (primary != null ? primary.getName() : "家属"));
+        fc.setContactPhone(primary != null ? primary.getPhone() : null);
+        fc.setChannel(req.getNotifyChannel() == null ? "电话" : req.getNotifyChannel());
+        fc.setReached(true);
+        fc.setAttitude(r.getFamilyAttitude());
+        fc.setOperatorName(UserContext.currentName());
+        fc.setNote("拒医复访" + (worsened ? "症状加重" : "症状未缓解")
+                + "，重新通知家属（原事件 " + root.getEventNo() + "）");
+        commRepo.save(fc);
+
+        // 重新通知医疗人员：家庭医生必通知；症状加重同时呼叫 120
+        createEscalationDispatch(ne, "FAMILY_DOCTOR", r.getDoctorName(), null,
+                req.getNotifyChannel(), "拒医复访" + (worsened ? "症状加重" : "症状未缓解")
+                        + "，请立即复诊评估（原拒医事件 " + root.getEventNo() + "）");
+        if (worsened) {
+            createEscalationDispatch(ne, "EMERGENCY_120", "120急救", "120",
+                    "电话", "拒医复访症状加重，需紧急送医（原拒医事件 " + root.getEventNo() + "）");
+        }
+        createEscalationDispatch(ne, "GRID_WORKER", "值班网格员", null,
+                req.getNotifyChannel(), "拒医复访升级事件，请上门协同（原事件 " + root.getEventNo() + "）");
+
+        // 提升老人综合风险等级：症状加重至少极高风险，未缓解至少高风险，只升不降
+        String targetLevel = worsened ? "CRITICAL" : "HIGH";
+        if (riskRank(targetLevel) > riskRank(elder.getRiskLevel())) {
+            elder.setRiskLevel(targetLevel);
+        } else if (worsened && !"CRITICAL".equals(elder.getRiskLevel())) {
+            elder.setRiskLevel("CRITICAL");
+        }
+        elder.setUpdatedAt(now);
+        elderRepo.save(elder);
+        addLog(ne, "SYSTEM", "已提升老人综合风险等级为 " + severityLabel(elder.getRiskLevel())
+                + "，并重新通知家属与医疗人员", "系统");
+
+        broadcast("event-new", ne.getId());
+        return ne;
+    }
+
+    private void createEscalationDispatch(HelpEvent ne, String targetType, String name, String phone,
+                                          String channel, String noteText) {
+        EventDispatch d = new EventDispatch();
+        d.setEvent(ne);
+        d.setTargetType(targetType);
+        d.setTargetName(name);
+        d.setTargetPhone(phone);
+        d.setNotifyChannel(channel == null ? "电话" : channel);
+        d.setStatus("NOTIFIED");
+        d.setNotifiedByName(UserContext.currentName());
+        d.setNotifiedAt(LocalDateTime.now());
+        d.setNote(noteText);
+        dispatchRepo.save(d);
+        addLog(ne, "DISPATCH", "已重新通知" + targetLabel(targetType) + "：" + name + "。" + noteText,
+                UserContext.currentName());
+    }
+
+    /** 定时扫描：到期未复访的任务标记逾期并提醒值班人员 */
+    @Transactional
+    public int markOverdueRevisits() {
+        List<RevisitTask> due = revisitRepo.findByStatusAndDueAtBefore("PENDING", LocalDateTime.now());
+        for (RevisitTask t : due) {
+            t.setStatus("OVERDUE");
+            revisitRepo.save(t);
+            addLog(t.getEvent(), "REVISIT", "24 小时复访任务已逾期（" + revisitMethodLabel(t.getMethod())
+                    + "，责任人 " + nz(t.getAssigneeName(), "未指派") + "），请立即复访", "系统");
+            Map<String, Object> p = new HashMap<>();
+            p.put("eventId", t.getEvent().getId());
+            p.put("taskId", t.getId());
+            sse.broadcast("revisit-overdue", p);
+            broadcast("event-update", t.getEvent().getId());
+        }
+        return due.size();
+    }
+
+    /** 工作台复访任务列表（含老人/事件摘要与逾期标记） */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> pendingRevisitTasks() {
+        List<Map<String, Object>> out = new ArrayList<>();
+        LocalDateTime now = LocalDateTime.now();
+        // 已逾期优先、其后待复访，组内按截止时间升序
+        for (String st : List.of("OVERDUE", "PENDING")) {
+            for (RevisitTask t : revisitRepo.findByStatusOrderByDueAtAsc(st)) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("id", t.getId());
+                m.put("eventId", t.getEvent().getId());
+                m.put("eventNo", t.getEvent().getEventNo());
+                m.put("elderId", t.getEvent().getElder().getId());
+                m.put("elderName", t.getEvent().getElder().getName());
+                m.put("riskLevel", t.getEvent().getElder().getRiskLevel());
+                m.put("method", t.getMethod());
+                m.put("status", t.getStatus());
+                m.put("assigneeName", t.getAssigneeName());
+                m.put("dueAt", t.getDueAt());
+                m.put("overdue", "OVERDUE".equals(t.getStatus()) || t.getDueAt().isBefore(now));
+                m.put("doctorName", t.getRefusal().getDoctorName());
+                m.put("abnormalSign", t.getRefusal().getAbnormalSign());
+                m.put("createdAt", t.getCreatedAt());
+                out.add(m);
+            }
+        }
+        return out;
+    }
+
+    private String normalizeRevisitMethod(String m) {
+        if (m == null) return "PHONE";
+        return switch (m) {
+            case "PHONE", "电话复访", "电话" -> "PHONE";
+            case "ONSITE", "上门复访", "上门" -> "ONSITE";
+            case "DOCTOR", "医生复诊", "复诊" -> "DOCTOR";
+            default -> m;
+        };
+    }
+
+    private int riskRank(String level) {
+        if (level == null) return 0;
+        return switch (level) {
+            case "LOW" -> 1;
+            case "MEDIUM" -> 2;
+            case "HIGH" -> 3;
+            case "CRITICAL" -> 4;
+            default -> 0;
+        };
+    }
+
     /* ===================== 回访 + 归档（联动更新画像） ===================== */
 
     @Transactional
     public EventFollowUp followUpAndClose(Long eventId, FollowUpRequest req) {
         HelpEvent e = mustGet(eventId);
+
+        // 拒医随访未完成不得关闭：必须先完成 24 小时复访，缓解后方可归档
+        List<MedicalRefusal> openRefusals = refusalRepo.findByEventIdOrderByRecordedAtAsc(eventId).stream()
+                .filter(r -> !r.isResolved()).toList();
+        if (!openRefusals.isEmpty()) {
+            long pending = revisitRepo.findByEventIdOrderByCreatedAtAsc(eventId).stream()
+                    .filter(t -> "PENDING".equals(t.getStatus()) || "OVERDUE".equals(t.getStatus())).count();
+            throw new ApiException("该事件存在老人拒绝就医记录且复访尚未完成（待复访任务 " + pending
+                    + " 个），事件不能直接关闭，请先完成 24 小时内复访");
+        }
+
         EventFollowUp f = new EventFollowUp();
         f.setEvent(e);
         f.setResult(req.getResult());
@@ -551,7 +902,36 @@ public class EventService {
         m.put("services", serviceRepo.findByEventIdOrderByServiceAtAsc(id));
         m.put("communications", commRepo.findByEventIdOrderByCommunicatedAtAsc(id));
         m.put("followUps", followUpRepo.findByEventIdOrderByFollowedUpAtAsc(id));
+
+        // 拒医随访闭环
+        List<MedicalRefusal> refusals = refusalRepo.findByEventIdOrderByRecordedAtAsc(id);
+        m.put("refusals", refusals);
+        m.put("revisitTasks", revisitRepo.findByEventIdOrderByCreatedAtAsc(id));
+        m.put("refusalBlocked", refusals.stream().anyMatch(r -> !r.isResolved()));
+
+        // 关联事件：升级事件回看原拒医事件，原事件展示其升级出的新事件
+        if (e.getRelatedEventId() != null) {
+            eventRepo.findById(e.getRelatedEventId()).ifPresent(rel ->
+                    m.put("relatedEvent", relatedBrief(rel)));
+        }
+        if ("REFUSAL_ROOT".equals(e.getRelationType())) {
+            eventRepo.findByRelatedEventId(id).forEach(rel ->
+                    m.put("escalatedEvent", relatedBrief(rel)));
+        }
         return m;
+    }
+
+    private Map<String, Object> relatedBrief(HelpEvent rel) {
+        Map<String, Object> b = new LinkedHashMap<>();
+        b.put("id", rel.getId());
+        b.put("eventNo", rel.getEventNo());
+        b.put("status", rel.getStatus());
+        b.put("severity", rel.getSeverity());
+        b.put("riskFlags", rel.getRiskFlags());
+        b.put("relationType", rel.getRelationType());
+        b.put("createdAt", rel.getCreatedAt());
+        b.put("elderName", rel.getElder().getName());
+        return b;
     }
 
     @Transactional
@@ -709,6 +1089,24 @@ public class EventService {
         };
     }
 
+    public static String revisitMethodLabel(String s) {
+        return switch (s) {
+            case "PHONE" -> "电话复访";
+            case "ONSITE" -> "上门复访";
+            case "DOCTOR" -> "医生复诊";
+            default -> s;
+        };
+    }
+
+    public static String revisitResultLabel(String s) {
+        return switch (s) {
+            case "RELIEVED" -> "症状缓解";
+            case "UNRELIEVED" -> "症状未缓解";
+            case "WORSENED" -> "症状加重";
+            default -> s;
+        };
+    }
+
     public static String riskLabel(String s) {
         return switch (s) {
             case "CANNOT_OPEN_DOOR" -> "无法开门";
@@ -716,6 +1114,7 @@ public class EventService {
             case "FAMILY_UNREACHABLE" -> "家属长期不接电话";
             case "NEIGHBOR_INFO_UNCLEAR" -> "邻居代报信息不清";
             case "REFUSE_HOSPITAL" -> "老人拒绝就医";
+            case "REFUSAL_ESCALATED" -> "拒医复访升级";
             case "HOME_SAFETY_HAZARD" -> "家中存在安全隐患";
             case "FREQUENT_NIGHT_HELP" -> "频繁夜间求助";
             default -> s;

@@ -144,22 +144,45 @@ npm run dev
 事件总数/夜间/送医、按风险等级分布、按研判类型分布、按服务类型分布、按回访结果分布、
 每日求助趋势、平均/最快/最慢响应时长与 15 分钟到场率、七类风险场景出现频次。
 
+### 5. 拒绝就医后的风险随访闭环（家庭医生判定异常、老人拒医）
+
+当**家庭医生判断老人血压等体征异常、但老人拒绝去医院**时，在事件详情中「登记拒绝就医」，
+平台强制留痕并启动随访闭环：
+
+1. **记录四要素**：医生建议（医生姓名/就诊建议/风险告知）、老人拒绝原因、家属是否知情（含家属姓名与态度）、替代照护安排（用药、监测、陪护）；
+2. **事件不能直接关闭**：登记后事件进入「拒医随访中」，系统自动生成一条 **24 小时内到期**的复访任务；此时点击「回访归档」会被后端拒绝；
+3. **复访任务区分三种方式**：`电话复访 PHONE` / `上门复访 ONSITE` / `医生复诊 DOCTOR`，可指派责任人与截止时间；
+   值班工作台顶部展示「拒医后 24 小时复访任务」看板，到期未复访由定时任务标记**逾期**并实时告警；
+4. **复访结果分流**：
+   - **症状缓解 RELIEVED** → 解除随访闭环，事件恢复正常回访归档；
+   - **症状加重 WORSENED** → 老人风险等级提升至**极高**、**重新通知家属与医疗人员（家庭医生 + 120 + 网格员）**，并生成一条新事件；
+   - **症状未缓解 UNRELIEVED** → 风险至少升至**高**、重新通知家属/家庭医生/网格员（不呼叫 120），并生成新事件；
+5. **历史带入新事件，防止被当成普通求助**：升级事件时间线自动写入
+   「⚠ 由拒医事件复访升级，不是一次新的普通求助」以及**原拒医记录、家属态度、医生建议、本次复访结论**，
+   新事件带 `REFUSAL_ESCALATED` 风险标记、状态直达「已研判」，并与原拒医事件双向关联（页面顶部红色横幅可互相跳转）。
+
+相关配置（`application.yml` / 环境变量）：
+`app.refusal-revisit-hours`（复访时限，默认 24 小时）、`app.refusal-scan-ms`（逾期扫描间隔，默认 60000ms）。
+
 ## 主要 API（服务端实现）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | /api/auth/login | 登录获取 Redis 令牌 |
-| GET | /api/events/stream | SSE 实时推送（新求助/状态变更/归档） |
+| GET | /api/events/stream | SSE 实时推送（新求助/状态变更/归档/拒医升级/复访逾期） |
 | POST | /api/events | 发起求助（自动定位偏移/夜间/频繁夜间/家属失联标记） |
 | GET | /api/events?status=&all=&elderId= | 事件队列 |
-| GET | /api/events/{id} | 事件聚合详情（含画像、各环节记录、时间线） |
+| GET | /api/events/{id} | 事件聚合详情（含画像、各环节记录、拒医/复访、关联事件、时间线） |
 | POST | /api/events/{id}/triage | 研判 |
 | POST | /api/events/{id}/dispatches | 转介通知 |
 | PUT | /api/events/dispatches/{id}/status | 受理/到场/无法响应 |
 | POST | /api/events/{id}/onsite | 上门核实 |
 | POST | /api/events/{id}/services | 后续服务 |
 | POST | /api/events/{id}/family-communications | 家属沟通 |
-| POST | /api/events/{id}/follow-up | 回访并归档（画像联动更新） |
+| POST | /api/events/{id}/medical-refusals | **登记拒绝就医，自动生成 24 小时内复访任务（三方式）** |
+| GET | /api/events/revisits/pending | **工作台待复访/已逾期任务** |
+| POST | /api/events/revisits/{taskId}/complete | **完成复访：缓解解除随访；加重/未缓解则升级、重新通知并生成携带历史的新事件** |
+| POST | /api/events/{id}/follow-up | 回访并归档（**拒医复访未完成时被拒绝**） |
 | POST | /api/events/{id}/flags | 人工补充风险标记 |
 | POST | /api/files/upload | 现场照片/语音上传 |
 | GET/POST/PUT | /api/elders... | 老人档案、紧急联系人、邻里响应人管理 |
@@ -167,21 +190,35 @@ npm run dev
 
 ## 已执行的验证（本地实际验证结论）
 
-验证环境：JDK 17 + Maven 3.8 + Node 22 + PostgreSQL 15 + Redis 7（2026-10-05）。
+验证环境：JDK 17 + Maven 3.9 + Node 22 + 本地 PostgreSQL 15（端口 5433，库 eldercare / care / care123）+ Redis 7（6379），
+验证日期 2026-10-06。本沙箱无 Docker，故未执行 `docker compose`，改为本地直连数据库 + `java -jar` 启动后端做接口冒烟。
 
-1. **后端编译打包**：`mvn package -DskipTests` 成功，产出 `target/eldercare.jar`。
-2. **全链路 API 冒烟**（curl，worker 账号）：
-   - 发起周桂兰夜间智能按钮求助，求助点距住址 **1516 米，自动标记“定位偏移”**，并因档案儿子长期不接电话自动标记“家属长期不接电话”；
-   - 完成研判（跌倒风险/紧急）→ 转介（邻居代报信息不清 + 网格员到场）→ 家属 2 次未接通 →
-     上门（智能锁授权、已跌倒、需送医、拒绝就医、需临时照护、家中安全隐患）→ 临时照护服务 → 回访“好转”归档；
-   - 归档后事件风险标记为 `LOCATION_OFFSET, FAMILY_UNREACHABLE, NEIGHBOR_INFO_UNCLEAR, REFUSE_HOSPITAL, HOME_SAFETY_HAZARD`，
-     老人画像更新为**极高风险**、家属响应评分 0、邻里可信度由 90 调整为 75、自动排期次日适老化改造关怀，
-     并勾选日常巡访/助餐/适老化改造建议；
-   - 另验证误触事件归档后吴德海误触计数 +1（风险等级不因误触降级）。
-3. **频繁夜间求助**：对郑秀珍连续发起第 3 次夜间求助时，事件自动带上 `FREQUENT_NIGHT_HELP` 标记。
-4. **鉴权**：无令牌访问 `/api/elders` 返回 401；错误密码登录被拒。
-5. **SSE**：工作台建立 `/api/events/stream` 连接后，新求助实时推送 `event-new`。
-6. **文件上传**：`POST /api/files/upload` 返回可访问 URL，静态资源 200。
-7. **前端**：`npm run build` 构建成功（2234 模块）；Vite dev（5173）启动后经代理登录 admin 成功，页面可正常打开。
+1. **后端编译打包**：`mvn package -DskipTests` 成功，产出 `target/eldercare.jar`；启动后自动新建
+   `event_medical_refusal`、`event_revisit_task` 表并为 `help_event` 增加关联字段，种子账号/档案正常。
+2. **前端构建**：`npm run build` 成功（Vite，含改造后的值班工作台与事件详情页）。
+3. **拒医随访全链路 API 冒烟**（curl，worker 账号）：
+   - 周桂兰电话求助（头晕、血压高）→ 研判身体不适/高 → 登记拒绝就医
+     （钱医生记录血压 185/110、就诊建议、老人“怕花钱”、家属周建国“尊重老人意愿”、替代照护与监测、**电话复访**）；
+     事件状态变为 `REFUSAL_TRACK`、`refusalBlocked=true`、自动生成 24 小时后到期任务；
+   - **复访未完成时点回访归档被后端 400 拒绝**：“存在老人拒绝就医记录且复访尚未完成…不能直接关闭”；
+   - 工作台 `GET /events/revisits/pending` 返回该待复访任务（老人、事件、方式、责任人、异常体征）；
+   - 复访登记 **WORSENED 症状加重（上门复测 198/118、肢体麻木）**：
+     生成升级事件 `ESCALATED_FROM_REFUSAL`、严重度直达 **CRITICAL**、带 `REFUSE_HOSPITAL,REFUSAL_ESCALATED` 标记；
+     新事件时间线完整带入**原拒医记录、家属态度、医生建议、本次复访结论**及“不是新的普通求助”横幅；
+     **重新通知**家属（沟通记录）、家庭医生、**120**、网格员；老人风险等级提升为 **CRITICAL**；原事件与新事件双向关联；
+   - 第二条事件（吴德海）走 **DOCTOR 医生复诊 → RELIEVED 症状缓解**：`refusalBlocked` 变 false，随后可正常回访归档（CLOSED）；
+   - 第三条事件（郑秀珍）复访截止时间设为过去，定时扫描（测试间隔 5s）自动把任务标记 **OVERDUE** 并在待办看板置顶；
+     随后登记 **UNRELIEVED 症状未缓解**：生成 HIGH 升级事件，通知家属/医生/网格员（**不呼叫 120**），
+     且本已 CRITICAL 的老人风险等级**只升不降**；
+   - 待复访列表在任务全部完成后清空；已完成任务重复提交被拒（“该复访任务已完成”）；
+     缺 `doctorAdvice` 触发 Bean Validation（must not be blank）；非法复访结果返回 400。
+4. **鉴权回归**：新接口均走登录令牌，未携带令牌访问会被拦截（沿用既有 `AuthInterceptor`）。
 
-> 说明：上门照片上传接口已实测；界面中的现场照片展示在没有真实图片时为示例路径。
+> 说明：SSE 新增事件 `refusal-escalated`（拒医升级）、`revisit-overdue`（24 小时复访逾期）由后端在对应节点广播，
+> 前端 MainLayout 已订阅并弹窗提醒；后端逻辑与推送点已随上述冒烟触发，浏览器端视觉效果未在无界面沙箱中截图。
+
+### Docker 启动（交付要求，提供但本沙箱未执行）
+
+仓库提供可一键启动的 `docker-compose.yml`（postgres / redis / backend / frontend）与各服务 Dockerfile，
+在具备 Docker 的环境执行 `docker compose up -d --build` 后访问 http://localhost:8081 即可，
+首次启动自动建表并写入测试账号与示例老人；拒医随访闭环的操作路径见上文第 5 节。
