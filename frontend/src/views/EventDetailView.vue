@@ -16,6 +16,22 @@
       </template>
     </el-page-header>
 
+    <!-- 历史拒医带入提示：老人有未缓解的拒医记录（来自之前事件） -->
+    <el-alert v-if="d.activeRefusal && d.activeRefusalEventNo" type="error" show-icon
+              :closable="false" style="margin-bottom:12px">
+      <template #title>
+        该老人有未缓解的拒医记录（来自事件 {{ d.activeRefusalEventNo }}，随访中）——本次求助勿按普通求助处理
+      </template>
+      <div style="font-size:13px;line-height:1.8">
+        <b>异常发现：</b>{{ d.activeRefusal.abnormalFinding || '身体指标异常' }}
+        <b>医生建议：</b>{{ d.activeRefusal.doctorAdvice }}
+        <b>拒绝原因：</b>{{ d.activeRefusal.refuseReason }}
+        <b>家属：</b>{{ d.activeRefusal.familyInformed ? `知情（${d.activeRefusal.familyAttitude || '态度未记录'}）` : '不知情' }}
+        <b>替代照护：</b>{{ d.activeRefusal.alternativeCare || '—' }}
+        <b>拒医风险等级：</b>{{ RISK_LEVEL_LABEL[d.activeRefusal.riskLevel] }}
+      </div>
+    </el-alert>
+
     <el-row :gutter="12">
       <!-- 左：处置区 -->
       <el-col :span="17">
@@ -61,9 +77,16 @@
                        v-if="d.event?.triageType && d.event.triageType !== 'FALSE_TRIGGER'">家属沟通</el-button>
             <el-button type="success" :icon="Files" @click="openService"
                        v-if="d.event?.triageType && d.event.triageType !== 'FALSE_TRIGGER'">④ 后续服务</el-button>
-            <el-button type="danger" plain :icon="CircleCheck" @click="openFollow">
-              {{ d.event?.triageType === 'FALSE_TRIGGER' ? '② 回访归档' : '⑤ 回访归档' }}
-            </el-button>
+            <el-button type="danger" plain :icon="FirstAidKit" @click="openRefusal"
+                       v-if="d.event?.triageType && d.event.triageType !== 'FALSE_TRIGGER' && !hasOpenRefusal">拒医登记</el-button>
+            <el-tooltip :disabled="!hasOpenRefusal" placement="top"
+                        content="存在随访中的拒医记录：须先完成 24 小时复访且症状缓解后才能归档">
+              <span>
+                <el-button type="danger" plain :icon="CircleCheck" @click="openFollow" :disabled="hasOpenRefusal">
+                  {{ d.event?.triageType === 'FALSE_TRIGGER' ? '② 回访归档' : '⑤ 回访归档' }}
+                </el-button>
+              </span>
+            </el-tooltip>
             <el-button :icon="EditPen" @click="noteDialog = true">添加备注</el-button>
           </el-space>
         </el-card>
@@ -134,6 +157,92 @@
               </el-descriptions-item>
               <el-descriptions-item v-if="v.note" label="备注" :span="2">{{ v.note }}</el-descriptions-item>
             </el-descriptions>
+          </div>
+        </el-card>
+
+        <!-- 拒绝就医 · 风险随访 -->
+        <el-card shadow="never" style="margin-bottom:12px" v-if="d.refusals?.length">
+          <template #header>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span class="section-title" style="margin:0;color:#c45656">拒绝就医 · 风险随访（{{ d.refusals.length }}）</span>
+              <span class="muted">随访解除前事件不能归档</span>
+            </div>
+          </template>
+          <div v-for="item in d.refusals" :key="item.refusal.id" class="record-box">
+            <el-descriptions :column="2" border size="small">
+              <el-descriptions-item label="随访状态">
+                <el-tag size="small" :type="REFUSAL_STATUS_TAG[item.refusal.status]" effect="dark">
+                  {{ REFUSAL_STATUS_LABEL[item.refusal.status] }}
+                </el-tag>
+                <el-tag size="small" :type="RISK_LEVEL_TAG[item.refusal.riskLevel]" effect="dark" style="margin-left:6px">
+                  拒医风险 {{ RISK_LEVEL_LABEL[item.refusal.riskLevel] }}
+                </el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item label="判断医生">{{ item.refusal.doctorName }}（登记：{{ item.refusal.createdByName }} · {{ fmt(item.refusal.createdAt) }}）</el-descriptions-item>
+              <el-descriptions-item label="异常发现" :span="2">
+                <span style="color:#f56c6c">{{ item.refusal.abnormalFinding || '—' }}</span>
+              </el-descriptions-item>
+              <el-descriptions-item label="医生建议" :span="2">{{ item.refusal.doctorAdvice }}</el-descriptions-item>
+              <el-descriptions-item label="老人拒绝原因" :span="2">{{ item.refusal.refuseReason }}</el-descriptions-item>
+              <el-descriptions-item label="家属知情">
+                <el-tag size="small" :type="item.refusal.familyInformed ? 'success' : 'danger'">
+                  {{ item.refusal.familyInformed ? '已知情' : '不知情' }}
+                </el-tag>
+                <span v-if="item.refusal.familyInformed" class="muted" style="margin-left:6px">
+                  态度：{{ item.refusal.familyAttitude || '未记录' }}
+                </span>
+              </el-descriptions-item>
+              <el-descriptions-item label="替代照护安排">{{ item.refusal.alternativeCare || '—' }}</el-descriptions-item>
+            </el-descriptions>
+
+            <!-- 复访任务 -->
+            <div style="margin:8px 0 4px;display:flex;justify-content:space-between;align-items:center">
+              <b style="font-size:13px">24 小时复访任务</b>
+              <el-dropdown v-if="item.refusal.status === 'OPEN'" @command="t => addTask(item.refusal.id, t)">
+                <el-button size="small" :icon="Plus">追加复访方式</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-for="(v, k) in FOLLOW_TASK_TYPE_LABEL" :key="k" :command="k">{{ v }}</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+            <el-table :data="item.tasks" size="small">
+              <el-table-column label="轮次" width="60" prop="roundNo" />
+              <el-table-column label="复访方式" width="100">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain">{{ FOLLOW_TASK_TYPE_LABEL[row.taskType] }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="截止时间" width="150">
+                <template #default="{ row }">
+                  <span :style="{ color: isOverdue(row) ? '#f56c6c' : '', fontWeight: isOverdue(row) ? 700 : 400 }">
+                    {{ fmt(row.dueAt) }}
+                  </span>
+                  <el-tag v-if="isOverdue(row)" type="danger" size="small" style="margin-left:4px">已逾期</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="row.status === 'PENDING' ? 'warning' : row.status === 'DONE' ? 'success' : 'info'">
+                    {{ FOLLOW_TASK_STATUS_LABEL[row.status] }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="复访结果" min-width="180">
+                <template #default="{ row }">
+                  <template v-if="row.result">
+                    <el-tag size="small" :type="FOLLOW_TASK_RESULT_TAG[row.result]" effect="dark">
+                      {{ FOLLOW_TASK_RESULT_LABEL[row.result] }}
+                    </el-tag>
+                    <span class="muted" style="margin-left:6px">{{ row.completedByName }} · {{ fmt(row.completedAt) }}</span>
+                    <div v-if="row.resultNote" class="muted">{{ row.resultNote }}</div>
+                  </template>
+                  <el-button v-else-if="row.status === 'PENDING'" type="primary" size="small"
+                             @click="openComplete(row)">完成复访</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
           </div>
         </el-card>
 
@@ -494,6 +603,78 @@
       </template>
     </el-dialog>
 
+    <!-- ===== 拒医登记 ===== -->
+    <el-dialog v-model="refusalDialog" title="拒绝就医登记（登记后生成 24 小时复访任务，随访解除前事件不能归档）" width="600px" top="4vh">
+      <el-alert type="warning" :closable="false" style="margin-bottom:12px"
+                title="家庭医生判断老人身体异常建议就医，但老人拒绝。请完整记录医生建议、拒绝原因、家属知情情况与替代照护安排" />
+      <el-form :model="refusal" label-width="100px">
+        <el-form-item label="判断医生" required>
+          <el-input v-model="refusal.doctorName" placeholder="如 钱医生" />
+        </el-form-item>
+        <el-form-item label="异常发现">
+          <el-input v-model="refusal.abnormalFinding" placeholder="如 血压 182/110 mmHg，伴头晕、心悸" />
+        </el-form-item>
+        <el-form-item label="医生建议" required>
+          <el-input v-model="refusal.doctorAdvice" type="textarea" :rows="2"
+                    placeholder="如 建议立即前往急诊观察，控制血压，排除心脑血管意外" />
+        </el-form-item>
+        <el-form-item label="拒绝原因" required>
+          <el-input v-model="refusal.refuseReason" type="textarea" :rows="2"
+                    placeholder="如 害怕住院 / 费用顾虑 / 自觉休息即可 / 无人陪同" />
+        </el-form-item>
+        <el-form-item label="家属知情">
+          <el-switch v-model="refusal.familyInformed" active-text="已知情" inactive-text="不知情" />
+        </el-form-item>
+        <el-form-item v-if="refusal.familyInformed" label="家属态度">
+          <el-radio-group v-model="refusal.familyAttitude">
+            <el-radio v-for="a in FAMILY_ATTITUDE_OPTIONS" :key="a" :value="a">{{ a }}</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="替代照护安排">
+          <el-input v-model="refusal.alternativeCare" type="textarea" :rows="2"
+                    placeholder="如 居家观察，每 4 小时测压；家庭医生每日两次电话随访；社区护士明早上门测压" />
+        </el-form-item>
+        <el-form-item label="首轮复访方式">
+          <el-radio-group v-model="refusal.followTaskType">
+            <el-radio v-for="(v, k) in FOLLOW_TASK_TYPE_LABEL" :key="k" :value="k">{{ v }}</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="refusalDialog = false">取消</el-button>
+        <el-button type="danger" @click="submitRefusal">登记并生成复访任务</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ===== 完成复访 ===== -->
+    <el-dialog v-model="completeDialog" :title="`完成复访（${FOLLOW_TASK_TYPE_LABEL[complete.taskType] || ''} · 第${complete.roundNo}轮）`" width="520px">
+      <el-alert v-if="complete.result === 'WORSENED'" type="error" :closable="false" style="margin-bottom:12px"
+                title="症状加重：提交后系统将提升拒医/事件/老人风险等级，自动重新通知家属和家庭医生，并生成下一轮 24 小时复访任务" />
+      <el-alert v-else-if="complete.result === 'UNCHANGED' || complete.result === 'NO_ANSWER'" type="warning"
+                :closable="false" style="margin-bottom:12px"
+                title="症状未缓解：拒医记录保持随访中，将生成下一轮复访任务；老人再次求助时本记录会自动带入新事件" />
+      <el-form :model="complete" label-width="110px">
+        <el-form-item label="复访结果" required>
+          <el-radio-group v-model="complete.result">
+            <el-radio v-for="(v, k) in FOLLOW_TASK_RESULT_LABEL" :key="k" :value="k">{{ v }}</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="复访说明">
+          <el-input v-model="complete.note" type="textarea" :rows="3"
+                    placeholder="如 复测血压 165/98，仍头晕；老人仍拒绝去医院" />
+        </el-form-item>
+        <el-form-item v-if="complete.result !== 'IMPROVED'" label="下一轮复访方式">
+          <el-radio-group v-model="complete.nextTaskType">
+            <el-radio v-for="(v, k) in FOLLOW_TASK_TYPE_LABEL" :key="k" :value="k">{{ v }}</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="completeDialog = false">取消</el-button>
+        <el-button :type="complete.result === 'WORSENED' ? 'danger' : 'primary'" @click="submitComplete">提交复访结果</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 风险标记 / 备注 -->
     <el-dialog v-model="flagDialog" title="补充风险标记" width="420px">
       <el-radio-group v-model="manualFlag" style="display:flex;flex-direction:column;gap:8px">
@@ -515,18 +696,20 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Plus, Search, Phone, House, ChatDotRound, Files, CircleCheck, CircleClose,
-  EditPen, Picture, UserFilled
+  EditPen, Picture, UserFilled, FirstAidKit
 } from '@element-plus/icons-vue'
 import api from '../api'
 import {
   SOURCE_LABEL, TRIAGE_LABEL, SEVERITY_LABEL, SEVERITY_TAG, TARGET_LABEL,
   SERVICE_LABEL, FOLLOW_RESULT_LABEL, RISK_LABEL, RISK_TAG, STATUS_LABEL, STATUS_TAG,
-  RISK_LEVEL_LABEL, RISK_LEVEL_TAG, ENTRY_METHODS, ELDER_STATUS_OPTIONS
+  RISK_LEVEL_LABEL, RISK_LEVEL_TAG, ENTRY_METHODS, ELDER_STATUS_OPTIONS,
+  FOLLOW_TASK_TYPE_LABEL, FOLLOW_TASK_RESULT_LABEL, FOLLOW_TASK_RESULT_TAG,
+  REFUSAL_STATUS_LABEL, REFUSAL_STATUS_TAG, FOLLOW_TASK_STATUS_LABEL, FAMILY_ATTITUDE_OPTIONS
 } from '../api/dict'
 
 const route = useRoute()
@@ -536,15 +719,17 @@ const loading = ref(false)
 const DISPATCH_STATUS = { NOTIFIED: '已通知', ACCEPTED: '已受理', ARRIVED: '已到场', REJECTED: '无法响应' }
 const LOG_LABEL = {
   HELP: '求助', TRIAGE: '研判', DISPATCH: '转介', ONSITE: '上门', SERVICE: '服务',
-  FAMILY_COMM: '家属沟通', FOLLOW_UP: '回访', CLOSE: '归档', SYSTEM: '系统', NOTE: '备注'
+  FAMILY_COMM: '家属沟通', FOLLOW_UP: '回访', CLOSE: '归档', SYSTEM: '系统', NOTE: '备注',
+  REFUSAL: '拒医', FOLLOW_TASK: '复访'
 }
 const LOG_TYPE = {
   HELP: 'danger', TRIAGE: 'warning', DISPATCH: 'warning', ONSITE: 'primary',
   SERVICE: 'success', FAMILY_COMM: 'info', FOLLOW_UP: 'success', CLOSE: 'success',
-  SYSTEM: 'info', NOTE: 'info'
+  SYSTEM: 'info', NOTE: 'info', REFUSAL: 'danger', FOLLOW_TASK: 'warning'
 }
 
 const flags = computed(() => (d.value.event?.riskFlags || '').split(',').filter(Boolean))
+const hasOpenRefusal = computed(() => (d.value.refusals || []).some(x => x.refusal.status === 'OPEN'))
 const uploadUrl = '/api/files/upload'
 const uploadHeaders = { Authorization: `Bearer ${localStorage.getItem('token')}` }
 
@@ -668,10 +853,66 @@ function openFollow() {
 }
 async function submitFollow() {
   await ElMessageBox.confirm('确认完成回访并归档？归档将联动更新老人画像', '归档确认', { type: 'warning' })
-  await api.post(`/events/${route.params.id}/follow-up`, follow)
-  ElMessage.success('事件已归档，画像与关怀计划已更新')
-  followDialog.value = false
+  try {
+    await api.post(`/events/${route.params.id}/follow-up`, follow)
+    ElMessage.success('事件已归档，画像与关怀计划已更新')
+    followDialog.value = false
+    load()
+  } catch (e) { /* 后端拦截（如存在随访中的拒医记录）时错误信息已由拦截器提示 */ }
+}
+
+/* ---- 拒医登记与复访 ---- */
+const refusalDialog = ref(false)
+const refusal = reactive({})
+function openRefusal() {
+  Object.assign(refusal, {
+    doctorName: '钱医生', abnormalFinding: '', doctorAdvice: '', refuseReason: '',
+    familyInformed: false, familyAttitude: '积极配合', alternativeCare: '', followTaskType: 'PHONE'
+  })
+  refusalDialog.value = true
+}
+async function submitRefusal() {
+  if (!refusal.doctorName) { ElMessage.warning('请填写判断医生'); return }
+  if (!refusal.doctorAdvice) { ElMessage.warning('请填写医生建议'); return }
+  if (!refusal.refuseReason) { ElMessage.warning('请填写老人拒绝原因'); return }
+  await api.post(`/events/${route.params.id}/refusals`, refusal)
+  ElMessage.success('拒医记录已登记，24 小时复访任务已生成')
+  refusalDialog.value = false
   load()
+}
+
+const completeDialog = ref(false)
+const complete = reactive({ id: null, taskType: '', roundNo: 1, result: 'IMPROVED', note: '', nextTaskType: 'PHONE' })
+watch(() => complete.result, r => {
+  // 加重默认升级为上门复访，其余默认电话复访（可手动调整）
+  complete.nextTaskType = r === 'WORSENED' ? 'VISIT' : 'PHONE'
+})
+function openComplete(task) {
+  Object.assign(complete, {
+    id: task.id, taskType: task.taskType, roundNo: task.roundNo,
+    result: 'IMPROVED', note: '', nextTaskType: 'PHONE'
+  })
+  completeDialog.value = true
+}
+async function submitComplete() {
+  await api.post(`/refusal-follow-tasks/${complete.id}/complete`, {
+    result: complete.result, note: complete.note, nextTaskType: complete.nextTaskType
+  })
+  if (complete.result === 'IMPROVED') ElMessage.success('症状缓解，拒医随访已解除，事件可回访归档')
+  else if (complete.result === 'WORSENED') ElMessage.warning('已提升风险等级并重新通知家属与家庭医生')
+  else ElMessage.info('已生成下一轮 24 小时复访任务')
+  completeDialog.value = false
+  load()
+}
+
+async function addTask(refusalId, taskType) {
+  await api.post(`/refusals/${refusalId}/tasks`, null, { params: { taskType } })
+  ElMessage.success(`已追加${FOLLOW_TASK_TYPE_LABEL[taskType]}任务`)
+  load()
+}
+
+function isOverdue(task) {
+  return task.status === 'PENDING' && task.dueAt && new Date(task.dueAt) < new Date()
 }
 
 const flagDialog = ref(false)

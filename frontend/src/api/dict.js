@@ -98,3 +98,48 @@ export const RISK_LEVEL_TAG = {
 export const ENTRY_METHODS = ['钥匙开门', '门禁密码', '智能锁授权', '邻居协助开门', '家属到场开门', '破锁入户', '未能入户']
 
 export const ELDER_STATUS_OPTIONS = ['清醒正常', '身体不适', '已跌倒', '意识不清', '情绪激动', '未见到老人']
+
+/* ---- 拒绝就医 · 风险随访 ---- */
+
+// 复访方式
+export const FOLLOW_TASK_TYPE_LABEL = {
+  PHONE: '电话复访',
+  VISIT: '上门复访',
+  DOCTOR_REVIEW: '医生复诊'
+}
+
+// 复访结果
+export const FOLLOW_TASK_RESULT_LABEL = {
+  IMPROVED: '症状缓解',
+  UNCHANGED: '未缓解',
+  WORSENED: '症状加重',
+  NO_ANSWER: '未联系上'
+}
+
+export const FOLLOW_TASK_RESULT_TAG = {
+  IMPROVED: 'success',
+  UNCHANGED: 'warning',
+  WORSENED: 'danger',
+  NO_ANSWER: 'info'
+}
+
+// 拒医记录状态
+export const REFUSAL_STATUS_LABEL = {
+  OPEN: '随访中',
+  RESOLVED: '已缓解解除'
+}
+
+export const REFUSAL_STATUS_TAG = {
+  OPEN: 'danger',
+  RESOLVED: 'success'
+}
+
+// 复访任务状态
+export const FOLLOW_TASK_STATUS_LABEL = {
+  PENDING: '待复访',
+  DONE: '已完成',
+  CANCELLED: '已取消'
+}
+
+// 家属态度
+export const FAMILY_ATTITUDE_OPTIONS = ['积极配合', '一般', '推诿拒绝', '未能联系上']

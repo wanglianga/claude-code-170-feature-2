@@ -15,6 +15,59 @@
       </el-col>
     </el-row>
 
+    <!-- 拒医风险复访任务（24 小时时限） -->
+    <el-card shadow="never" style="margin-bottom:12px" v-if="followTasks.length">
+      <template #header>
+        <div class="card-head">
+          <span class="section-title" style="margin:0;color:#c45656">
+            拒医风险复访任务
+            <el-badge :value="followTasks.length" type="danger" style="margin-left:8px" />
+          </span>
+          <span class="muted">拒绝就医登记后 24 小时内须完成复访，逾期红色标记</span>
+        </div>
+      </template>
+      <el-table :data="followTasks" size="small" @row-click="row => $router.push(`/events/${row.event.id}`)"
+                style="cursor:pointer" :row-class-name="row => isOverdue(row) ? 'row-overdue' : ''">
+        <el-table-column label="事件" width="130">
+          <template #default="{ row }">{{ row.event.eventNo }}</template>
+        </el-table-column>
+        <el-table-column label="老人" width="90">
+          <template #default="{ row }">{{ row.elder.name }}</template>
+        </el-table-column>
+        <el-table-column label="复访方式" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain">{{ FOLLOW_TASK_TYPE_LABEL[row.taskType] }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="轮次" width="60">
+          <template #default="{ row }">第{{ row.roundNo }}轮</template>
+        </el-table-column>
+        <el-table-column label="医生建议 / 拒绝原因" min-width="260">
+          <template #default="{ row }">
+            <div style="font-size:12px">
+              <div><b>建议：</b>{{ row.refusal.doctorAdvice }}</div>
+              <div class="muted"><b>拒绝：</b>{{ row.refusal.refuseReason }} · 家属{{ row.refusal.familyInformed ? `知情(${row.refusal.familyAttitude || '未记录'})` : '不知情' }}</div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="拒医风险" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" :type="RISK_LEVEL_TAG[row.refusal.riskLevel]" effect="dark">
+              {{ RISK_LEVEL_LABEL[row.refusal.riskLevel] }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="截止时间" width="170">
+          <template #default="{ row }">
+            <span :style="{ color: isOverdue(row) ? '#f56c6c' : '', fontWeight: isOverdue(row) ? 700 : 400 }">
+              {{ fmt(row.dueAt) }}
+            </span>
+            <el-tag v-if="isOverdue(row)" type="danger" size="small" style="margin-left:4px">已逾期</el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
     <el-card shadow="never">
       <template #header>
         <div class="card-head">
@@ -120,12 +173,14 @@ import { Bell, BellFilled, Moon, Timer, CircleCheck, Warning } from '@element-pl
 import api from '../api'
 import {
   SOURCE_LABEL, TRIAGE_LABEL, SEVERITY_LABEL, SEVERITY_TAG,
-  RISK_LABEL, RISK_TAG, STATUS_LABEL, STATUS_TAG
+  RISK_LABEL, RISK_TAG, STATUS_LABEL, STATUS_TAG,
+  FOLLOW_TASK_TYPE_LABEL, RISK_LEVEL_LABEL, RISK_LEVEL_TAG
 } from '../api/dict'
 
 const router = useRouter()
 const events = ref([])
 const elders = ref([])
+const followTasks = ref([])
 const loading = ref(false)
 const filter = ref('')
 const showHelp = ref(false)
@@ -157,6 +212,14 @@ async function loadElders() {
   elders.value = await api.get('/elders')
 }
 
+async function loadFollowTasks() {
+  followTasks.value = await api.get('/refusal-follow-tasks', { params: { status: 'PENDING' } })
+}
+
+function isOverdue(task) {
+  return task.status === 'PENDING' && task.dueAt && new Date(task.dueAt) < new Date()
+}
+
 async function submitHelp() {
   if (!helpForm.elderId) {
     ElMessage.warning('请选择老人')
@@ -177,10 +240,11 @@ function fmt(s) {
   return s ? s.replace('T', ' ').substring(0, 16) : ''
 }
 
-function onReload() { load() }
+function onReload() { load(); loadFollowTasks() }
 onMounted(() => {
   load()
   loadElders()
+  loadFollowTasks()
   window.addEventListener('workbench-reload', onReload)
 })
 onUnmounted(() => window.removeEventListener('workbench-reload', onReload))
@@ -192,4 +256,5 @@ onUnmounted(() => window.removeEventListener('workbench-reload', onReload))
 .kpi-num { font-size: 30px; font-weight: 700; line-height: 1.2; }
 .card-head { display: flex; justify-content: space-between; align-items: center; }
 :deep(.row-new) { background: #fef0f0 !important; }
+:deep(.row-overdue) { background: #fef0f0 !important; }
 </style>

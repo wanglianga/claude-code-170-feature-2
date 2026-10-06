@@ -38,6 +38,8 @@ app:
   location-offset-meters: 500
   # 30 天内夜间求助达到该次数即标记“频繁夜间求助”
   frequent-night-threshold: 3
+  # 拒绝就医后风险复访任务时限（小时）
+  refusal-follow-hours: 24
 
 logging:
   level:

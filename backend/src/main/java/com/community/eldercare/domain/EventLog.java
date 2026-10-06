@@ -22,7 +22,8 @@ public class EventLog {
     private HelpEvent event;
 
     /** HELP 求助 / TRIAGE 研判 / DISPATCH 转介 / ONSITE 上门 / SERVICE 服务 /
-     *  FAMILY_COMM 家属沟通 / FOLLOW_UP 回访 / CLOSE 归档 / SYSTEM 系统标记 / NOTE 备注 */
+     *  FAMILY_COMM 家属沟通 / FOLLOW_UP 回访 / CLOSE 归档 / SYSTEM 系统标记 / NOTE 备注 /
+     *  REFUSAL 拒医登记与历史带入 / FOLLOW_TASK 拒医复访任务 */
     @Column(nullable = false)
     private String type;
 

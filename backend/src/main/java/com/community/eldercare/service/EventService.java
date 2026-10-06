@@ -31,6 +31,8 @@ public class EventService {
     private final EventFollowUpRepository followUpRepo;
     private final EmergencyContactRepository contactRepo;
     private final NeighborResponderRepository neighborRepo;
+    private final RefusalRecordRepository refusalRepo;
+    private final RiskFollowTaskRepository followTaskRepo;
     private final SseService sse;
 
     @Value("${app.location-offset-meters:500}")
@@ -44,6 +46,7 @@ public class EventService {
                         OnsiteVisitRepository onsiteRepo, EventServiceRepository serviceRepo,
                         FamilyCommunicationRepository commRepo, EventFollowUpRepository followUpRepo,
                         EmergencyContactRepository contactRepo, NeighborResponderRepository neighborRepo,
+                        RefusalRecordRepository refusalRepo, RiskFollowTaskRepository followTaskRepo,
                         SseService sse) {
         this.eventRepo = eventRepo;
         this.elderRepo = elderRepo;
@@ -55,6 +58,8 @@ public class EventService {
         this.followUpRepo = followUpRepo;
         this.contactRepo = contactRepo;
         this.neighborRepo = neighborRepo;
+        this.refusalRepo = refusalRepo;
+        this.followTaskRepo = followTaskRepo;
         this.sse = sse;
     }
 
@@ -106,6 +111,11 @@ public class EventService {
                 .filter(EmergencyContact::isOftenUnreachable).findFirst()
                 .ifPresent(c -> flags.add("FAMILY_UNREACHABLE"));
 
+        // 未缓解的拒医记录随新求助自动带入：防止值班人员只看到一次新的普通求助
+        Optional<RefusalRecord> activeRefusal =
+                refusalRepo.findFirstByElderIdAndStatusOrderByCreatedAtDesc(elder.getId(), "OPEN");
+        activeRefusal.ifPresent(r -> flags.add("REFUSE_HOSPITAL"));
+
         e.setRiskFlags(String.join(",", flags));
         e = eventRepo.save(e);
 
@@ -120,6 +130,20 @@ public class EventService {
                 + "；门禁 " + nz(elder.getDoorAccessInfo(), "无")
                 + "；画像风险 " + elder.getRiskLevel()
                 + "；历史误触 " + elder.getFalseTriggerCount() + " 次", "系统");
+
+        // 拒医历史带入：原拒医记录、家属态度、医生建议一并提示值班人员
+        final HelpEvent saved = e;
+        activeRefusal.ifPresent(r -> addLog(saved, "REFUSAL",
+                "历史拒医带入（来自事件 " + r.getEvent().getEventNo() + "，症状未缓解，随访中）："
+                        + "异常发现 " + nz(r.getAbnormalFinding(), "身体指标异常")
+                        + "；医生建议：" + r.getDoctorAdvice()
+                        + "；老人拒绝原因：" + r.getRefuseReason()
+                        + "；家属" + (r.isFamilyInformed()
+                        ? "知情，态度 " + nz(r.getFamilyAttitude(), "未记录") : "不知情")
+                        + (r.getAlternativeCare() != null && !r.getAlternativeCare().isBlank()
+                        ? "；替代照护安排：" + r.getAlternativeCare() : "")
+                        + "；当前拒医风险等级 " + severityLabel(r.getRiskLevel())
+                        + "。本次求助请结合上述情况研判，勿按普通求助处理。", "系统"));
 
         broadcast("event-new", e.getId());
         return e;
@@ -337,6 +361,11 @@ public class EventService {
     @Transactional
     public EventFollowUp followUpAndClose(Long eventId, FollowUpRequest req) {
         HelpEvent e = mustGet(eventId);
+        // 存在随访中的拒医记录时事件不能直接关闭：须先完成 24 小时复访且症状缓解
+        if (refusalRepo.existsByEventIdAndStatus(eventId, "OPEN")) {
+            throw new ApiException("存在未解除的拒绝就医风险随访：请先完成 24 小时复访任务，"
+                    + "确认症状缓解后才能归档（症状加重/未缓解将继续随访）");
+        }
         EventFollowUp f = new EventFollowUp();
         f.setEvent(e);
         f.setResult(req.getResult());
@@ -551,6 +580,22 @@ public class EventService {
         m.put("services", serviceRepo.findByEventIdOrderByServiceAtAsc(id));
         m.put("communications", commRepo.findByEventIdOrderByCommunicatedAtAsc(id));
         m.put("followUps", followUpRepo.findByEventIdOrderByFollowedUpAtAsc(id));
+        // 拒医风险随访：本事件的拒医记录（含复访任务）+ 老人未缓解的历史拒医（随求助带入）
+        List<Map<String, Object>> refusals = new ArrayList<>();
+        for (RefusalRecord r : refusalRepo.findByEventIdOrderByCreatedAtDesc(id)) {
+            Map<String, Object> rm = new LinkedHashMap<>();
+            rm.put("refusal", r);
+            rm.put("tasks", followTaskRepo.findByRefusalIdOrderByCreatedAtAsc(r.getId()));
+            refusals.add(rm);
+        }
+        m.put("refusals", refusals);
+        RefusalRecord active = refusalRepo
+                .findFirstByElderIdAndStatusOrderByCreatedAtDesc(e.getElder().getId(), "OPEN")
+                .orElse(null);
+        m.put("activeRefusal", active);
+        if (active != null && !active.getEvent().getId().equals(id)) {
+            m.put("activeRefusalEventNo", active.getEvent().getEventNo());
+        }
         return m;
     }
 

@@ -96,6 +96,19 @@ function connectSse() {
   es.addEventListener('event-update', () => {
     if (route.path === '/workbench') reloadWorkbench?.()
   })
+  es.addEventListener('refusal-escalated', ev => {
+    try {
+      const p = JSON.parse(ev.data)
+      ElNotification({
+        title: '拒医复访症状加重',
+        message: `拒医风险随访复访发现症状加重，风险等级已提升，系统已重新通知家属和家庭医生（事件 #${p.eventId}）`,
+        type: 'error',
+        duration: 0,
+        onClick: () => router.push(`/events/${p.eventId}`)
+      })
+      window.dispatchEvent(new CustomEvent('workbench-reload'))
+    } catch (e) { /* ignore */ }
+  })
   es.addEventListener('event-closed', () => reloadWorkbench?.())
   es.onerror = () => {
     online.value = false
